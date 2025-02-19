@@ -1,10 +1,25 @@
 #ifndef NEXUS_ROS_H
 #define NEXUS_ROS_H
 
+#define _NAMIKI_MOTOR	 //for Namiki 22CL-103501PG80:1
+
+#include <PinChangeInt.h>
+#include <PinChangeIntConfig.h>
 #include <MotorWheel.h>
 #include <Omni4WD.h>
-#include <math.h>
-#include <stdint.h>
+
+irqISR(irq1,isr1);
+MotorWheel wheel1(3,2,4,5,&irq1);
+
+irqISR(irq2,isr2);
+MotorWheel wheel2(11,12,14,15,&irq2);
+
+irqISR(irq3,isr3);
+MotorWheel wheel3(9,8,16,17,&irq3);
+
+irqISR(irq4,isr4);
+MotorWheel wheel4(10,7,18,19,&irq4);
+
 
 /**
  * @brief NexusRos クラス (方法C)
@@ -23,15 +38,10 @@ public:
      * @param omni  Omni4WD のポインタ（外部で生成済みのものを渡す）
      * @param wheelRadius  ロボット中心からホイール中心までの距離 R [mm]
      */
-    NexusRos(Omni4WD* omni, float wheelRadius)
-        : omni_(omni)
-        , R_(wheelRadius)
-        , x_(0.0f)
-        , y_(0.0f)
-        , theta_(0.0f)
-        , lastUpdateMillis_(0)
+    NexusRos()
     {
     }
+    float val = 0.0f;
 
     /**
      * @brief デストラクタ
@@ -51,13 +61,28 @@ public:
      */
     void init(float kc = 0.31f, float taui = 0.01f, float taud = 0.0f, unsigned int interval = 10)
     {
-        if(!omni_) return;
+        
+        TCCR1B = TCCR1B & 0xf8 | 0x01; 
+        TCCR2B = TCCR2B & 0xf8 | 0x01;
+        omni_ = new Omni4WD(&wheel1, &wheel2, &wheel3, &wheel4);
 
         // Omni4WD 側のPID初期化
         omni_->PIDEnable(kc, taui, taud, interval);
 
         // "MOTORS_FB" に切り替え (前後が正方向という設定)
         omni_->switchMotorsReset();
+        omni_->setCarStop();
+    }
+    bool ts;
+
+    void update(){
+
+        float val = random(-150.0f, 150.0f);
+    
+        omni_->wheelULSetSpeedMMPS(val);
+
+        omni_->delayMS(50);
+        // Serial.println(val);
     }
 
     /**
@@ -66,28 +91,19 @@ public:
      * 内部で逆運動学を用いて各ホイールの設定速度を計算し、
      * `wheelXxxSetSpeedMMPS(速度, DIR_...)` を直接呼び出す。
      */
-    void setVelocity(float vx, float vy, float w)
+    void setVelocity(const unsigned int& v_ul ,const unsigned int& v_ll ,const unsigned int& v_lr ,const  unsigned int& v_ur)
     {
         if(!omni_) return;
-
-        // 45°オフセット配置を仮定(ダイヤ型)
-        // alpha = 1/sqrt(2)
-        static const float alpha = 1.0f / (float)M_SQRT2;
-
-        // 各ホイール目標速度 [mm/s]
-        // ここで sign(速度) によって DIR_ADVANCE / DIR_BACKOFF を振り分けるため、
-        // setWheelSpeedMMPS() の中で fabs() + 方向判定をする
-        float v1 = alpha * (vx + vy) + R_ * w;   // UpperLeft
-        float v2 = alpha * (-vx + vy) + R_ * w;  // LowerLeft
-        float v3 = alpha * (-vx - vy) + R_ * w;  // LowerRight
-        float v4 = alpha * ( vx - vy) + R_ * w;  // UpperRight
-
         // 実際に Omni4WD::wheelULSetSpeedMMPS(...) などを呼ぶ
         // 符号がプラスなら DIR_ADVANCE、マイナスなら DIR_BACKOFF
-        setWheelSpeedMMPS(v1, &Omni4WD::wheelULSetSpeedMMPS);
-        setWheelSpeedMMPS(v2, &Omni4WD::wheelLLSetSpeedMMPS);
-        setWheelSpeedMMPS(v3, &Omni4WD::wheelLRSetSpeedMMPS);
-        setWheelSpeedMMPS(v4, &Omni4WD::wheelURSetSpeedMMPS);
+        float val = -1.0f;
+        // omni_->setMotorAll(1, false);
+        omni_->wheelULSetSpeedMMPS(val);
+        // setWheelSpeedMMPS(v_ul, &Omni4WD::wheelULSetSpeedMMPS);
+        // setWheelSpeedMMPS(v_ll, &Omni4WD::wheelLLSetSpeedMMPS);
+        // setWheelSpeedMMPS(v_lr, &Omni4WD::wheelLRSetSpeedMMPS);
+        // setWheelSpeedMMPS(v_ur, &Omni4WD::wheelURSetSpeedMMPS);
+        // omni_->getCarSpeedMMPS();
     }
 
     /**
@@ -100,56 +116,88 @@ public:
      * 
      * @param currentMillis Arduino標準の millis() など
      */
-    void updateOdometry(unsigned long currentMillis)
+    void updateOdometry()
     {
         if(!omni_) return;
+        pulse_ul_ = omni_->wheelULGetCurPulse();
+        pulse_ll_ = omni_->wheelLLGetCurPulse();
+        pulse_lr_ = omni_->wheelLRGetCurPulse();
+        pulse_ur_ = omni_->wheelURGetCurPulse();
+        // Serial.print("p1: "); Serial.print(pulse_ul_);
+        // Serial.print(", p2: "); Serial.print(pulse_ll_);
+        // Serial.print(", p3: "); Serial.print(pulse_lr_);
+        // Serial.print(", p4: "); Serial.println(pulse_ur_);
+        sendPulseDataBinary(pulse_ul_, pulse_ll_, pulse_lr_, pulse_ur_, 0xA0);
+    }
 
-        unsigned long dtMillis = (lastUpdateMillis_ == 0) ? 0 : (currentMillis - lastUpdateMillis_);
-        lastUpdateMillis_ = currentMillis;
-        if(dtMillis == 0) {
-            // 初回呼び出しまたは時間差が0の場合はスキップ
-            return;
-        }
-        float dt = (float)dtMillis * 0.001f; // 秒
+    void sendPulseDataBinary(long p1, long p2, long p3, long p4, byte data_type)
+    {
+        // データ部のサイズ (4つの long → 16 バイト)
+        const uint16_t data_length = 16;
+        // 総パケットサイズ: STX + データ種類 + データ長(2B) + データ部 + チェックサム + ETX = 22 バイト
+        const uint16_t total_size = 1 + 1 + 2 + data_length + 1 + 1; 
+        byte buffer[total_size];
+        uint16_t offset = 0;
+        byte checksum = 0;  // チェックサムは加算した下位 1 バイトとする
 
-        // 各ホイール実速度 [mm/s] を取得
-        // ※ライブラリが正負の速度を返すかどうか注意
-        //   MotorWheel::getSpeedMMPS() は正のみの可能性あり
-        float v1 = (float)omni_->wheelULGetSpeedMMPS(); // UpperLeft
-        float v2 = (float)omni_->wheelLLGetSpeedMMPS(); // LowerLeft
-        float v3 = (float)omni_->wheelLRGetSpeedMMPS(); // LowerRight
-        float v4 = (float)omni_->wheelURGetSpeedMMPS(); // UpperRight
+        // 1) STX (チェックサム計算対象外)
+        buffer[offset++] = 0x02;
 
-        // ここでは仮に全て正値として扱い、向きは無視していますが
-        // 実際には DIR_BACKOFF のときは負速度にするなど工夫が必要。
-        // 例: if (omni_->_wheelUL->getDir()==DIR_BACKOFF) v1 = -v1; など
+        // 2) データ種類 (1 バイト)
+        buffer[offset] = data_type;
+        checksum += data_type;  // ここで同時に加算
+        offset++;
 
-        // 逆方向の合成行列で (vx, vy, w) を復元
-        static const float alpha = 1.0f / (float)M_SQRT2;
-        // 下記は一例。ロボット軸の取り方や回転方向により符号が変わるかもしれない
-        // 参考式:
-        //   vx = 0.5 * alpha * (v1 - v2 - v3 + v4)
-        //   vy = 0.5 * alpha * (v1 + v2 - v3 - v4)
-        //   w  = (v1 + v2 + v3 + v4) / (4*R_)
-        // (本来はマトリックスで行う)
-        float vx = 0.5f * alpha * (v1 - v2 - v3 + v4);
-        float vy = 0.5f * alpha * (v1 + v2 - v3 - v4);
-        float sum = (v1 + v2 + v3 + v4);
-        float w  = sum / (4.0f * R_); // rad/s
+        // 3) データ長 (2 バイト, リトルエンディアン)
+        buffer[offset] = (byte)(data_length & 0xFF);
+        checksum += buffer[offset];
+        offset++;
+        buffer[offset] = (byte)((data_length >> 8) & 0xFF);
+        checksum += buffer[offset];
+        offset++;
 
-        // ロボット座標→世界座標への変換 (theta_ を用いる)
-        float cosT = cosf(theta_);
-        float sinT = sinf(theta_);
+        // 4) データ部: 4 つの long を個別にアンローリングして格納
+        union {
+            long val;
+            byte b[4];
+        } converter;
 
-        float dx  = vx * cosT - vy * sinT;
-        float dy  = vx * sinT + vy * cosT;
-        float dth = w;
+        // p1 の処理
+        converter.val = p1;
+        buffer[offset] = converter.b[0]; checksum += converter.b[0]; offset++;
+        buffer[offset] = converter.b[1]; checksum += converter.b[1]; offset++;
+        buffer[offset] = converter.b[2]; checksum += converter.b[2]; offset++;
+        buffer[offset] = converter.b[3]; checksum += converter.b[3]; offset++;
 
-        x_     += dx * dt;
-        y_     += dy * dt;
-        theta_ += dth * dt;
+        // p2 の処理
+        converter.val = p2;
+        buffer[offset] = converter.b[0]; checksum += converter.b[0]; offset++;
+        buffer[offset] = converter.b[1]; checksum += converter.b[1]; offset++;
+        buffer[offset] = converter.b[2]; checksum += converter.b[2]; offset++;
+        buffer[offset] = converter.b[3]; checksum += converter.b[3]; offset++;
 
-        // theta_ の正規化が必要ならここで実施 (例: -π < theta_ <= +π)
+        // p3 の処理
+        converter.val = p3;
+        buffer[offset] = converter.b[0]; checksum += converter.b[0]; offset++;
+        buffer[offset] = converter.b[1]; checksum += converter.b[1]; offset++;
+        buffer[offset] = converter.b[2]; checksum += converter.b[2]; offset++;
+        buffer[offset] = converter.b[3]; checksum += converter.b[3]; offset++;
+
+        // p4 の処理
+        converter.val = p4;
+        buffer[offset] = converter.b[0]; checksum += converter.b[0]; offset++;
+        buffer[offset] = converter.b[1]; checksum += converter.b[1]; offset++;
+        buffer[offset] = converter.b[2]; checksum += converter.b[2]; offset++;
+        buffer[offset] = converter.b[3]; checksum += converter.b[3]; offset++;
+
+        // 5) チェックサム (上記で逐次計算済み)
+        buffer[offset++] = checksum;
+
+        // 6) ETX
+        buffer[offset++] = 0x03;
+
+        // 完成したパケットを一括送信
+        // Serial.write(buffer, total_size);
     }
 
     /**
@@ -162,9 +210,6 @@ public:
     }
 
     // --- オドメトリ取得 ---
-    float getX() const     { return x_; }
-    float getY() const     { return y_; }
-    float getTheta() const { return theta_; }
 
 private:
     /**
@@ -173,25 +218,20 @@ private:
      * 速度の符号を見て DIR_ADVANCE / DIR_BACKOFF を切り替え、
      * 絶対値を Omni4WD::wheelXxxSetSpeedMMPS(...) に渡す。
      */
-    void setWheelSpeedMMPS(float speedValue,
-                           unsigned int (Omni4WD::*wheelFunc)(unsigned int,bool))
+    void setWheelSpeedMMPS(unsigned int speedValue,
+                           unsigned int (Omni4WD::*wheelFunc)(unsigned int))
     {
         if(!omni_) return;
-
-        bool dir = (speedValue >= 0.0f) ? DIR_ADVANCE : DIR_BACKOFF;
-        unsigned int spd = (unsigned int)fabs(speedValue);
-
+        float val = 10.0f;
+        Serial.print("Speed : ");
+        Serial.println(val);
         // 実際に呼び出し (例: (omni_->*wheelFunc)(spd, dir); )
-        (omni_->*wheelFunc)(spd, dir);
+        (omni_->*wheelFunc)(val);
     }
 
 private:
     Omni4WD* omni_;      ///< Omni4WD インスタンス（外部管理）
-    float    R_;         ///< 中心→ホイール中心までの距離[mm]
-
-    float x_;            ///< オドメトリ推定 x[mm]
-    float y_;            ///< オドメトリ推定 y[mm]
-    float theta_;        ///< オドメトリ推定 θ[rad]
+    long pulse_ul_, pulse_ll_, pulse_ur_, pulse_lr_;
 
     unsigned long lastUpdateMillis_; ///< オドメトリ更新用に記録する時刻
 };
